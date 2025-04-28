@@ -1,0 +1,510 @@
+---
+title: "ENPOL Logistic Regression Models"
+author: "Franco Bastida"
+date: "2025-04-28"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+#Step 0. Package Loading
+knitr::opts_chunk$set(echo = TRUE,
+                      eval = TRUE,
+                      error = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      comment = NA)
+
+pacman::p_load(haven, descr, table1, sf, ggplot2, dplyr, janitor, gt, gtsummary, ggeffects, webshot, htmltools, car, scales, patchwork)
+options(scipen = 999)
+
+ENPOL <- read.csv("logitmodel_ENPOL.csv", encoding = "latin1")
+```
+
+## Descriptive Statistics
+
+```{r, results='asis', echo=FALSE}
+#Descriptives with Dependent Variable
+ENPOL$REENTRY <- factor(ENPOL$REENTRY, levels = c("Expected Reentry", "No Reentry"))
+ENPOL$GENDER <- factor(ENPOL$GENDER, levels = c("Men", "Women"))
+ENPOL$COHORT <- factor(ENPOL$COHORT, levels = c("Cohort 18-25", "Cohort 26-35", "Cohort 36-45", "Cohort 46+"))
+ENPOL$SENT <- factor(ENPOL$SENT, levels = c("Over 2 years", "6 months to 2 years", "Less than 6 months"))
+ENPOL$EDU <- factor(ENPOL$EDU, levels = c("Low Education", "Mid Education", "High Education"))
+ENPOL$CHILD <- factor(ENPOL$CHILD, levels = c("Yes", "No"))
+ENPOL$PRIOROFF <- factor(ENPOL$PRIOROFF, levels = c("Yes", "No"))
+ENPOL$PARTNER <- factor(ENPOL$PARTNER, levels = c("Married/Partner", "Divorced/Separated", "Single"))
+
+table1::label(ENPOL$REENTRY) <- "DEP: Expects Prison Reentry"
+table1::label(ENPOL$GENDER) <- "Gender"
+table1::label(ENPOL$COHORT) <- "Age Cohort Groups"
+table1::label(ENPOL$SENT) <- "Time In Prison"
+table1::label(ENPOL$EDU) <- "Education"
+table1::label(ENPOL$CHILD) <- "Children (under 18)"
+table1::label(ENPOL$PARTNER) <- "Civil Status"
+options(table1.fontsize = "small") 
+table1(~ REENTRY + COHORT + PARTNER + CHILD + EDU + SENT | GENDER, data = ENPOL)
+```
+
+
+```{r, results='asis', echo=FALSE}
+#Filter for those Receiving Visitations Only
+ENPOL_visits <- ENPOL %>%
+  filter(VISIT == "Had Visits")
+
+ENPOL_visits$VISIT <- factor(ENPOL_visits$VISIT, levels = c("Had Visits", "No Visits"))
+ENPOL_visits$INSTSUPPORT <- factor(ENPOL_visits$INSTSUPPORT, levels = c("Yes", "No"))
+ENPOL_visits$CAREGIVINGSUPPORT <- factor(ENPOL_visits$CAREGIVINGSUPPORT, levels = c("Yes", "No"))
+
+table1::label(ENPOL_visits$REENTRY) <- "DEP: Expects Prison Reentry"
+table1::label(ENPOL_visits$INSTSUPPORT) <- "IV: Instrumental Support"
+table1::label(ENPOL_visits$CAREGIVINGSUPPORT) <- "IV: Caregiving Support"
+table1(~ REENTRY + INSTSUPPORT + CAREGIVINGSUPPORT | GENDER, data = ENPOL_visits)
+
+#Selection Bias Pre Check
+ENPOL_visits_nomissing <- ENPOL_visits %>%
+  filter(!is.na(OTHERCAREGIVER))
+
+table1(~ REENTRY + INSTSUPPORT + CAREGIVINGSUPPORT | GENDER, data = ENPOL_visits)
+
+table1(~ REENTRY + INSTSUPPORT + CAREGIVINGSUPPORT + OTHERCAREGIVER | GENDER, data = ENPOL_visits)
+
+table1(~ REENTRY + INSTSUPPORT + CAREGIVINGSUPPORT + OTHERCAREGIVER | GENDER, data = ENPOL_visits_nomissing)
+
+```
+
+
+```{r, results='asis', echo=FALSE}
+#Filter for those with Children Only
+ENPOL_children <- ENPOL_visits %>%
+  filter(CHILD == "Yes")
+
+ENPOL_children$POSITIVEEXP <- factor(ENPOL_children$POSITIVEEXP, levels = c("Yes", "No"))
+ENPOL_children$NEG_FAMILY_EXP <- factor(ENPOL_children$NEG_FAMILY_EXP, levels = c("Yes", "No"))
+
+table1::label(ENPOL_children$REENTRY) <- "DEP: Expects Prison Reentry"
+table1::label(ENPOL_children$POSITIVEEXP) <- "IV: Positive Family Experiences"
+table1::label(ENPOL_children$NEG_FAMILY_EXP) <- "IV: Negative Family Experiences"
+table1(~ REENTRY + POSITIVEEXP + NEG_FAMILY_EXP | GENDER, data = ENPOL_children)
+```
+
+
+
+```{r, results='asis', echo=FALSE}
+#Model 1: Family Structure
+
+# Separate modeling subsets
+ENPOL_men <- ENPOL %>% 
+	filter(GENDER == "Men")
+ENPOL_women <- ENPOL %>% 
+	filter(GENDER == "Women")
+
+#Model 1 Men
+ENPOL_men$REENTRY_binary <- ifelse(ENPOL_men$REENTRY == "Expected Reentry", 1,
+                               ifelse(ENPOL_men$REENTRY == "No Reentry", 0, NA))
+ENPOL_men$REENTRY_binary <- as.numeric(ENPOL_men$REENTRY_binary)
+
+#Recoding Reference Categories
+ENPOL_men$PARTNER <- relevel(ENPOL_men$PARTNER, ref = "Married/Partner")
+ENPOL_men$CHILD <- relevel(ENPOL_men$CHILD, ref = "Yes")
+ENPOL_men$EDU <- relevel(ENPOL_men$EDU, ref = "Low Education")          
+ENPOL_men$SENT <- relevel(ENPOL_men$SENT, ref = "Over 2 years") 
+
+model_01_men <- glm(REENTRY_binary ~ PARTNER + CHILD + EDU + SENT + COHORT,
+                     data = ENPOL_men, family = binomial())
+
+vif(model_01_men) #No Multicollinearity
+
+tbl_model_men <- tbl_regression(model_01_men, exponentiate = TRUE, 
+                                include = c(PARTNER, CHILD, EDU, SENT, COHORT),
+                                label = list(
+                                  PARTNER ~ "Marriage",
+                                  CHILD ~ "Has Children",
+                                  EDU ~ "Education Level",
+                                  SENT ~ "Time in Prison",
+                                  COHORT ~ "Age Cohort"
+                                ))
+
+tbl_model_men
+```
+
+
+```{r, results='asis', echo=FALSE}
+#Model 1: Family Structure
+
+#Model 1 Women
+ENPOL_women$REENTRY_binary <- ifelse(ENPOL_women$REENTRY == "Expected Reentry", 1,
+                               ifelse(ENPOL_women$REENTRY == "No Reentry", 0, NA))
+ENPOL_women$REENTRY_binary <- as.numeric(ENPOL_women$REENTRY_binary)
+
+#Recoding Reference Categories
+ENPOL_women$PARTNER <- relevel(ENPOL_women$PARTNER, ref = "Married/Partner")
+ENPOL_women$CHILD <- relevel(ENPOL_women$CHILD, ref = "Yes")
+ENPOL_women$EDU <- relevel(ENPOL_women$EDU, ref = "Low Education")          
+ENPOL_women$SENT <- relevel(ENPOL_women$SENT, ref = "Over 2 years") 
+
+model_01_women <- glm(REENTRY_binary ~ PARTNER + CHILD + EDU + SENT + COHORT,
+                     data = ENPOL_women, family = binomial())
+
+vif(model_01_women) #No Multicollinearity
+
+tbl_model_women <- tbl_regression(model_01_women, exponentiate = TRUE, 
+														include = c(PARTNER, CHILD, EDU, SENT, COHORT),
+                            label = list(
+                              PARTNER ~ "Marriage",
+                              CHILD ~ "Has Children",
+                              EDU ~ "Education Level",
+                              SENT ~ "Time in Prison",
+                              COHORT ~ "Age Cohort"
+                            ))
+
+tbl_model_women
+```
+
+```{r, results='asis', echo=FALSE}
+#Model 2: Family Support
+
+ENPOL_visits_men <- ENPOL_visits %>%
+  filter(GENDER == "Men")
+
+#Dropped 20% or 6,262 observations - checks out
+
+ENPOL_visits_women <- ENPOL_visits %>%
+  filter(GENDER == "Women")
+
+#Dropped 43% or 4,756 observations - checks out
+
+#Model 2 Men
+ENPOL_visits_men$REENTRY_binary <- ifelse(ENPOL_visits_men$REENTRY == "Expected Reentry", 1,
+                               ifelse(ENPOL_visits_men$REENTRY == "No Reentry", 0, NA))
+ENPOL_visits_men$REENTRY_binary <- as.numeric(ENPOL_visits_men$REENTRY_binary)
+
+#Recoding Reference Categories
+ENPOL_visits_men$PARTNER <- relevel(ENPOL_visits_men$PARTNER, ref = "Married/Partner")
+ENPOL_visits_men$CHILD <- relevel(ENPOL_visits_men$CHILD, ref = "Yes")
+ENPOL_visits_men$EDU <- relevel(ENPOL_visits_men$EDU, ref = "Low Education")          
+ENPOL_visits_men$SENT <- relevel(ENPOL_visits_men$SENT, ref = "Over 2 years") 
+ENPOL_visits_men$INSTSUPPORT <- factor(ENPOL_visits_men$INSTSUPPORT, levels = c("No", "Yes"))
+ENPOL_visits_men$CAREGIVINGSUPPORT <- factor(ENPOL_visits_men$CAREGIVINGSUPPORT, levels = c("No", "Yes"))
+
+model_02_support_men <- glm(REENTRY_binary ~ INSTSUPPORT + CAREGIVINGSUPPORT + PARTNER + CHILD + EDU + SENT + COHORT,
+                            data = ENPOL_visits_men, family = binomial())
+
+vif(model_02_support_men) #No Multicollinearity
+
+tbl_model_support_men <- tbl_regression(model_02_support_men, exponentiate = TRUE,
+                                        include = c(INSTSUPPORT, CAREGIVINGSUPPORT, PARTNER, CHILD, EDU, SENT, COHORT),
+                                        label = list(
+                                          INSTSUPPORT ~ "Instrumental Support",
+                                          CAREGIVINGSUPPORT ~ "Caregiving Support",
+                                          PARTNER ~ "Marriage",
+                                          CHILD ~ "Has Children",
+                                          EDU ~ "Education Level",
+                                          SENT ~ "Time in Prison",
+                                          COHORT ~ "Age Cohort"
+                                        ))
+
+tbl_model_support_men
+```
+
+```{r, results='asis', echo=FALSE}
+#Model 2 Men Grouped Plot OR
+
+#Converting into a data frame
+tidy_model_men <- broom::tidy(model_02_support_men, exponentiate = TRUE, conf.int = TRUE)
+
+tidy_support_men <- tidy_model_men %>%
+  filter(term %in% c("INSTSUPPORTYes", "CAREGIVINGSUPPORTYes")) %>% #Used here taking the No (reference)
+  mutate(
+    predictor = case_when(
+      term == "INSTSUPPORTYes" ~ "Instrumental Support",
+      term == "CAREGIVINGSUPPORTYes" ~ "Caregiving Support",
+      TRUE ~ term
+    ),
+    type_of_support = "Family Support"
+  )
+
+#Facet Wrap Plot
+ggplot(tidy_support_men, aes(x = predictor, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  scale_y_log10() +  # log scale for Odds Ratios
+  labs(
+    title = "Group Plot of Odds Ratios for Family Support Preditors (Men Only)",
+    x = "Type of Support",
+    y = "Odds Ratio (log scale with 95% CI)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave("figure2_familysupport_men.png", width = 7, height = 5, dpi = 300)
+```
+
+```{r, results='asis', echo=FALSE}
+#Model 2 Women
+
+#Model 2 Women
+ENPOL_visits_women$REENTRY_binary <- ifelse(ENPOL_visits_women$REENTRY == "Expected Reentry", 1,
+                               ifelse(ENPOL_visits_women$REENTRY == "No Reentry", 0, NA))
+ENPOL_visits_women$REENTRY_binary <- as.numeric(ENPOL_visits_women$REENTRY_binary)
+
+#Recoding Reference Categories
+ENPOL_visits_women$PARTNER <- relevel(ENPOL_visits_women$PARTNER, ref = "Married/Partner")
+ENPOL_visits_women$CHILD <- relevel(ENPOL_visits_women$CHILD, ref = "Yes")
+ENPOL_visits_women$EDU <- relevel(ENPOL_visits_women$EDU, ref = "Low Education")          
+ENPOL_visits_women$SENT <- relevel(ENPOL_visits_women$SENT, ref = "Over 2 years") 
+ENPOL_visits_women$INSTSUPPORT <- factor(ENPOL_visits_women$INSTSUPPORT, levels = c("No", "Yes"))
+ENPOL_visits_women$CAREGIVINGSUPPORT <- factor(ENPOL_visits_women$CAREGIVINGSUPPORT, levels = c("No", "Yes"))
+
+model_02_support_women <- glm(REENTRY_binary ~ INSTSUPPORT + CAREGIVINGSUPPORT + PARTNER + CHILD + EDU + SENT + COHORT,
+                            data = ENPOL_visits_women, family = binomial())
+
+
+vif(model_02_support_women) #No Multicollinearity
+
+tbl_model_support_women <- tbl_regression(model_02_support_women, exponentiate = TRUE,
+                                        include = c(INSTSUPPORT, CAREGIVINGSUPPORT, PARTNER, CHILD, EDU, SENT, COHORT),
+                                        label = list(
+                                          INSTSUPPORT ~ "Instrumental Support",
+                                          CAREGIVINGSUPPORT ~ "Caregiving Support",
+                                          PARTNER ~ "Marriage",
+                                          CHILD ~ "Has Children",
+                                          EDU ~ "Education Level",
+                                          SENT ~ "Time in Prison",
+                                          COHORT ~ "Age Cohort"
+                                        ))
+
+tbl_model_support_women
+
+```
+
+```{r, results='asis', echo=FALSE}
+#Model 2 Women Grouped Plot OR 
+
+#Converting into a data frame
+tidy_model_women <- broom::tidy(model_02_support_women, exponentiate = TRUE, conf.int = TRUE)
+
+tidy_support_women <- tidy_model_women %>%
+  filter(term %in% c("INSTSUPPORTYes", "CAREGIVINGSUPPORTYes")) %>% #Used here taking the No (reference)
+  mutate(
+    predictor = case_when(
+      term == "INSTSUPPORTYes" ~ "Instrumental Support",
+      term == "CAREGIVINGSUPPORTYes" ~ "Caregiving Support",
+      TRUE ~ term
+    ),
+    type_of_support = "Family Support"
+  )
+
+#Grouped Plot
+ggplot(tidy_support_women, aes(x = predictor, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_point(size = 3) +
+  geom_errorbar(width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  scale_y_log10() +  # log scale for Odds Ratios
+  labs(
+    title = "Group Plot of Odds Ratios for Family Support Preditors (Women Only)",
+    x = "Type of Support",
+    y = "Odds Ratio (log scale with 95% CI)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10)
+  )
+
+ggsave("figure3_familysupport_women.png", width = 7, height = 5, dpi = 300)
+```
+
+
+```{r, results='asis', echo=FALSE}
+#Model 3 Interaction with Negative Family Experiences
+
+ENPOL_children_men <- ENPOL_visits_men %>%
+  filter(CHILD == "Yes")
+
+#Check for Multicollinearity
+
+model_children_men <- glm(REENTRY_binary ~ INSTSUPPORT + CAREGIVINGSUPPORT + 
+																	NEG_FAMILY_EXP + PARTNER +
+																	EDU + SENT + COHORT,
+																data = ENPOL_children_men, 
+																family = binomial())
+
+vif(model_children_men)
+
+#Modeling with Interactions: Instrumental
+model_03_negexperiences_men <- glm(REENTRY_binary ~ 
+                    INSTSUPPORT * NEG_FAMILY_EXP +
+                    PARTNER + EDU + SENT + COHORT,
+                    data = ENPOL_children_men, 
+                    family = binomial())
+
+summary(model_03_negexperiences_men)
+
+predicted_model3_neg <- ggpredict(model_03_negexperiences_men, 
+                              terms = c("INSTSUPPORT", "NEG_FAMILY_EXP"))
+
+predicted_model3_neg
+
+plot_predicted_model3_neg <- ggplot(predicted_model3_neg, aes(x = x, y = predicted, color = group)) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), 
+                  position = position_dodge(width = 0.5), 
+                  size = 0.8) +
+  labs(
+  	x = "Received Instrumental Support",
+    y = "Predicted Probability (%)",
+    color = "Negative Family Experiences"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) 
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 14)
+  )
+  
+ggsave("interaction_instsupport_reentry.png",
+       plot = plot_predicted_model3_neg,
+       width = 14, height = 6, dpi = 300)
+  
+#title = "Interaction: Negative Family Experiences and Instrumental Support (Men Only)",
+
+#Modeling with Interactions: Instrumental
+model_03_negexperiences_men2 <- glm(REENTRY_binary ~ 
+                    CAREGIVINGSUPPORT * NEG_FAMILY_EXP +
+                    PARTNER + EDU + SENT + COHORT,
+                    data = ENPOL_children_men, 
+                    family = binomial())
+
+summary(model_03_negexperiences_men2)
+
+predicted_model3_neg2 <- ggpredict(model_03_negexperiences_men2, 
+                              terms = c("CAREGIVINGSUPPORT", "NEG_FAMILY_EXP"))
+
+predicted_model3_neg2
+
+plot_predicted_model3_neg2 <- ggplot(predicted_model3_neg2, aes(x = x, y = predicted, color = group)) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), 
+                  position = position_dodge(width = 0.5), 
+                  size = 0.8) +
+  labs(
+  	x = "Received Caregiving Support",
+    y = "Predicted Probability (%)",
+    color = "Negative Family Experiences"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) 
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 14)
+  )
+  
+ggsave("interaction_instsupport_reentry2.png",
+       plot = plot_predicted_model3_neg2,
+       width = 14, height = 6, dpi = 300)
+  
+#title = "Interaction: Negative Family Experiences and Caregiving Support (Men Only)",
+
+plot_predicted_model3_neg / plot_predicted_model3_neg2
+
+```
+
+
+```{r, results='asis', echo=FALSE}
+#Model 3 Interaction with Negative Family Experiences
+
+ENPOL_children_women <- ENPOL_visits_women %>%
+  filter(CHILD == "Yes")
+
+#Check for Multicollinearity
+
+model_children_women <- glm(REENTRY_binary ~ INSTSUPPORT + CAREGIVINGSUPPORT + 
+																	NEG_FAMILY_EXP + PARTNER +
+																	EDU + SENT + COHORT,
+																data = ENPOL_children_women, 
+																family = binomial())
+
+vif(model_children_women)
+
+ENPOL_children_women$NEG_FAMILY_EXP <- as.factor(ENPOL_children_women$NEG_FAMILY_EXP)
+
+#Modeling with Interactions: Instrumental
+model_03_negexperiences_women <- glm(REENTRY_binary ~ 
+                    INSTSUPPORT * NEG_FAMILY_EXP +
+                    PARTNER + EDU + SENT + COHORT,
+                    data = ENPOL_children_women, 
+                    family = binomial())
+
+summary(model_03_negexperiences_women)
+
+predicted_model3_neg_women <- ggpredict(model_03_negexperiences_women, 
+                              terms = c("INSTSUPPORT", "NEG_FAMILY_EXP"))
+
+predicted_model3_neg_women
+
+plot_predicted_model3_neg_women <- ggplot(predicted_model3_neg_women, aes(x = x, y = predicted, color = group)) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), 
+                  position = position_dodge(width = 0.5), 
+                  size = 0.8) +
+  labs(
+  	x = "Received Instrumental Support",
+    y = "Predicted Probability (%)",
+    color = "Negative Family Experiences"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) 
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 14)
+  )
+  
+ggsave("interaction_instsupport_reentry_women.png",
+       plot = instrumental_plot_men,
+       width = 14, height = 6, dpi = 300)
+  
+#title = "Interaction: Negative Family Experiences and Instrumental Support (Men Only)",
+
+#Modeling with Interactions: Instrumental
+model_03_negexperiences_women2 <- glm(REENTRY_binary ~ 
+                    CAREGIVINGSUPPORT * NEG_FAMILY_EXP +
+                    PARTNER + EDU + SENT + COHORT,
+                    data = ENPOL_children_women, 
+                    family = binomial())
+
+summary(model_03_negexperiences_women2)
+
+predicted_model3_neg2_women <- ggpredict(model_03_negexperiences_women2, 
+                              terms = c("CAREGIVINGSUPPORT", "NEG_FAMILY_EXP"))
+
+predicted_model3_neg2_women
+
+plot_predicted_model3_neg2_women <- ggplot(predicted_model3_neg2_women, aes(x = x, y = predicted, color = group)) +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), 
+                  position = position_dodge(width = 0.5), 
+                  size = 0.8) +
+  labs(
+  	x = "Received Caregiving Support",
+    y = "Predicted Probability (%)",
+    color = "Negative Family Experiences"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) 
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 14)
+  )
+  
+ggsave("interaction_instsupport_reentry2_women.png",
+       plot = instrumental_plot_men,
+       width = 14, height = 6, dpi = 300)
+  
+#title = "Interaction: Negative Family Experiences and Caregiving Support (Men Only)",
+
+plot_predicted_model3_neg_women / plot_predicted_model3_neg2_women
+
+```
